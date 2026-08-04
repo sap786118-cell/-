@@ -18,6 +18,17 @@ from html import escape
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+
+
+# تشغيل خادم ويب مدمج لفتح البورت لـ Render
+def run_web_server():
+  port = int(os.environ.get('PORT', 8080))
+  server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+  server.serve_forever()
+
+
+threading.Thread(target=run_web_server, daemon=True).start()
 
 # ================== إعداد التسجيل ==================
 logging.basicConfig(
