@@ -2138,8 +2138,6 @@ def init_db():
     for uid in user_notifications:
         user_notifications[uid] = True
     
-    init_security()
-
 def init_security():
     security = read_json(SECURITY_DB)
     if 'master_key' not in security:
@@ -2150,6 +2148,7 @@ def init_security():
 
 if __name__ == "__main__":
     init_db()
+    init_security()
     threading.Thread(target=monitor, daemon=True).start()
     logger.info("=" * 30)
     logger.info("Div: @telnet_api - البوت يعمل")
@@ -2160,3 +2159,4 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Polling error: {e}")
             time.sleep(5)
+
