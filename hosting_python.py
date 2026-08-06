@@ -28,12 +28,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ================== التوكن والمتغيرات الأساسية ==================
-TOKEN = "ضع التوكين هنا"  # استخدم متغير بيئة في الإنتاج
+TOKEN = "8955451883:AAFmFOjx4bNCpv03SL9dC59U4pblMQzkBR8" 
 if not TOKEN:
     logger.critical("❌ لم يتم تعيين BOT_TOKEN في متغيرات البيئة")
     sys.exit(1)
 
-ADMIN_ID = 1678797887  # غيّره إلى معرفك 
+ADMIN_ID = 8105998916  # غيّره إلى معرفك 
 
 # ================== تثبيت المكتبات المطلوبة ==================
 required_modules = {
