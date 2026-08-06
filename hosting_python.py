@@ -12,6 +12,7 @@ import requests
 import zipfile
 import hashlib
 import base64
+import ast
 from telebot import types
 from datetime import datetime, timedelta
 from html import escape
@@ -28,12 +29,14 @@ class WebServerHandler(BaseHTTPRequestHandler):
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), WebServerHandler)
-    server.serve_forever()
+    try:
+        server = HTTPServer(("0.0.0.0", port), WebServerHandler)
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Web server error: {e}")
 
 threading.Thread(target=run_web_server, daemon=True).start()
 
-# ================== إعداد التسجيل ==================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -41,15 +44,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== التوكن والمتغيرات الأساسية ==================
 TOKEN = "8955451883:AAFmFOjx4bNCpv03SL9dC59U4pblMQzkBR8" 
 if not TOKEN:
-    logger.critical("❌ لم يتم تعيين BOT_TOKEN في متغيرات البيئة")
+    logger.critical("❌ لم يتم تعيين BOT_TOKEN")
     sys.exit(1)
 
-ADMIN_ID = 8105998916  # غيّره إلى معرفك 
+ADMIN_ID = 8105998916
 
-# ================== تثبيت المكتبات المطلوبة ==================
 required_modules = {
     'telebot': 'pyTelegramBotAPI',
     'requests': 'requests',
@@ -74,7 +75,6 @@ if missing_packages:
 
 import telebot
 
-# ================== إنشاء البوت والمجلدات ==================
 bot = telebot.TeleBot(TOKEN, threaded=True, parse_mode="HTML")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -86,18 +86,15 @@ THUMBS_DIR = os.path.join(ASSETS_DIR, 'thumbs')
 ENV_DIR = os.path.join(BASE_DIR, 'bot_environments')
 ENCRYPTED_DIR = os.path.join(BASE_DIR, 'encrypted_files')
 
-
 for d in [RUNNING_DIR, LOGS_DIR, DB_DIR, ASSETS_DIR, THUMBS_DIR, ENV_DIR, ENCRYPTED_DIR]:
     os.makedirs(d, exist_ok=True)
 
-# ================== مسارات قواعد البيانات ==================
 USERS_DB = os.path.join(DB_DIR, 'users.json')
 FILES_DB = os.path.join(DB_DIR, 'files.json')
 SETTINGS_DB = os.path.join(DB_DIR, 'settings.json')
 ADMINS_DB = os.path.join(DB_DIR, 'admins.json')
 SECURITY_DB = os.path.join(DB_DIR, 'security.json')
 
-# ================== المتغيرات العامة ==================
 db_lock = threading.Lock()
 cancel_states = {}
 last_bot_messages = {}
@@ -180,7 +177,6 @@ def encrypt_file_content(content, fid, user_id):
     except Exception as e:
         logger.error(f"Encryption error: {e}")
         return None
-
 def decrypt_file_content(encrypted_json, fid):
     try:
         data = json.loads(encrypted_json)
@@ -214,13 +210,84 @@ def load_encrypted_file(fid):
         return decrypt_file_content(encrypted_content, fid)
     return None
 
-def save_running_file(fid, content):
-    running_path = os.path.join(RUNNING_DIR, f"{fid}.py")
-    with open(running_path, 'w', encoding='utf-8') as f:
-        f.write(content)
-    return running_path
+def ban_user(user_id, reason="رفع ملفات خبيثة"):
+    users = read_json(USERS_DB)
+    if str(user_id) in users:
+        users[str(user_id)]['is_banned'] = 1
+        users[str(user_id)]['ban_reason'] = reason
+        write_json(USERS_DB, users)
+    
+    files = read_json(FILES_DB)
+    for fid, f in list(files.items()):
+        if f.get('user_id') == user_id:
+            stop_script(fid)
+            f['status'] = 'banned'
+    write_json(FILES_DB, files)
+    
+    logger.warning(f"🚨 تم حظر المستخدم {user_id} تلقائياً للسبب: {reason}")
+    try:
+        bot.send_message(user_id, deco("🚫 تم حظرك تلقائياً", f"تم حظرك وحظر ملفاتك للسبب التالي:\n<b>{reason}</b>"))
+    except:
+        pass
+    for adm in get_admins():
+        try:
+            bot.send_message(adm, f"🚨 <b>تنبيه أمني!</b>\nتم حظر المستخدم <code>{user_id}</code> تلقائياً.\nالسبب: {reason}")
+        except:
+            pass
 
-# ================== دوال المساعدة الأساسية ==================
+def scan_code_security(code_str):
+    if TOKEN in code_str:
+        return False, "محاولة استخدام توكن البوت الرئيسي للتحكم بالبوت!"
+    
+    dangerous_patterns = [
+        (r'import\s+sys|from\s+sys', "محاولة الوصول لمكتبة sys"),
+        (r'import\s+subprocess|from\s+subprocess', "محاولة تنفيذ أوامر النظام (subprocess)"),
+        (r'import\s+os|from\s+os', "محاولة التعامل مع نظام الملفات (os)"),
+        (r'import\s+shutil|from\s+shutil', "محاولة التعامل مع الملفات المتقدمة (shutil)"),
+        (r'eval\s*\(', "استخدام دالة eval الخطيرة"),
+        (r'exec\s*\(', "استخدام دالة exec الخطيرة"),
+        (r'__import__\s*\(', "استخدام __import__ لاستدعاء مكتبات مخفية"),
+        (r'open\s*\(\s*[\'"].*?\.(json|log|db|key|enc)[\'"]', "محاولة الوصول لقواعد بيانات أو ملفات البوت"),
+        (r'ban_chat_member|kick_chat_member', "محاولة حظر المستخدمين القسرية"),
+        (r'get_updates|delete_webhook', "محاولة التجسس أو تعطيل استقبال الرسائل"),
+        (r'USERS_DB|FILES_DB|SETTINGS_DB|ADMINS_DB|SECURITY_DB', "محاولة الوصول لمتغيرات قواعد البيانات")
+    ]
+    
+    for pattern, reason in dangerous_patterns:
+        if re.search(pattern, code_str, re.IGNORECASE):
+            return False, f"رمز غير مسموح: {reason}"
+            
+    try:
+        tree = ast.parse(code_str)
+        class SecurityVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.violates = False
+                self.reason = ""
+                
+            def visit_Attribute(self, node):
+                if node.attr in ['__subclasses__', '__bases__', '__mro__', '__globals__', '__code__']:
+                    self.violates = True
+                    self.reason = f"محاولة التسلل البرمجي عبر الخصائص المخفية: {node.attr}"
+                self.generic_visit(node)
+                
+            def visit_Call(self, node):
+                if isinstance(node.func, ast.Name):
+                    if node.func.id in ['compile', 'globals', 'locals']:
+                        self.violates = True
+                        self.reason = f"استخدام دالة نظام غير آمنة: {node.func.id}"
+                self.generic_visit(node)
+
+        visitor = SecurityVisitor()
+        visitor.visit(tree)
+        if visitor.violates:
+            return False, visitor.reason
+    except SyntaxError:
+        pass
+    except Exception as e:
+        logger.error(f"AST Scan error: {e}")
+
+    return True, "آمن"
+
 def verify_file_access(fid, user_id):
     files = read_json(FILES_DB)
     if fid not in files:
@@ -249,7 +316,6 @@ def toggle_auto_approve():
     return settings['auto_approve']
 
 def is_admin(user_id):
-    """التحقق من صلاحية الأدمن (المالك أو في قائمة الأدمن)"""
     if user_id == ADMIN_ID:
         return True
     admins_data = read_json(ADMINS_DB)
@@ -319,21 +385,6 @@ def check_sub(user_id):
     except:
         return True
 
-def get_preview(path, lines=40):
-    try:
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.readlines()
-                preview = "".join(content[:lines])
-                safe = escape(preview)
-                if len(safe) > 3000:
-                    safe = safe[:3000] + "\n..."
-                return f"<pre><code class='language-python'>{safe}</code></pre>"
-        return "❌ تعذر قراءة الملف"
-    except Exception as e:
-        logger.error(f"Preview error: {e}")
-        return "❌ خطأ في القراءة"
-
 def get_logs(fid, lines=40):
     log_path = os.path.join(LOGS_DIR, f"{fid}.log")
     try:
@@ -350,23 +401,6 @@ def get_logs(fid, lines=40):
     except Exception as e:
         logger.error(f"Logs error: {e}")
         return "❌ خطأ في القراءة"
-
-def update_token(path, new_token):
-    keywords = ["TOKEN", "bot_token", "api_key", "tok", "TKN", "BOT_TKN", "API_TOKEN"]
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        pattern = r"(['\"])\d{8,12}:[a-zA-Z0-9_-]{35,}(['\"])"
-        new_content = re.sub(pattern, f"\\1{new_token}\\2", content)
-        for kw in keywords:
-            kw_pattern = rf"{kw}\s*=\s*(['\"])[^'\"]+(['\"])"
-            new_content = re.sub(kw_pattern, f"{kw} = \\1{new_token}\\2", new_content)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(new_content)
-        return True
-    except Exception as e:
-        logger.error(f"Update token error: {e}")
-        return False
 
 def check_token(token):
     try:
@@ -415,6 +449,12 @@ def start_script(fid):
     encrypted_content = load_encrypted_file(fid)
     if not encrypted_content:
         return False
+
+    is_safe, reason = scan_code_security(encrypted_content)
+    if not is_safe:
+        ban_user(user_id, f"محاولة تشغيل ملف خبيث ({reason})")
+        return False
+
     env_dir = os.path.join(ENV_DIR, fid)
     os.makedirs(env_dir, exist_ok=True)
     env_file_path = os.path.join(env_dir, f"{fid}.py")
@@ -476,7 +516,6 @@ def write_proc(fid, cmd):
         except:
             pass
     return False
-
 def create_zip(files_list, zip_name):
     zip_path = os.path.join(BASE_DIR, zip_name)
     with zipfile.ZipFile(zip_path, 'w') as zipf:
@@ -498,7 +537,6 @@ def auto_fix_errors(code):
         code = re.sub(pattern, replacement, code)
     return code
 
-# ================== دوال إرسال الرسائل ==================
 def delete_last_message(chat_id):
     if chat_id in last_bot_messages:
         try:
@@ -556,13 +594,11 @@ def del_msg(chat_id, *msg_ids):
             except:
                 pass
 
-
 def main_kb(uid):
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("📤 رفع ملف جديد", callback_data="nav_upload"))
     kb.row(
         types.InlineKeyboardButton("📁 ملفاتي", callback_data="nav_files"),
-        
     )
     kb.row(
         types.InlineKeyboardButton("💼 محفظتي", callback_data="nav_wallet"),
@@ -584,7 +620,6 @@ def pro_panel_kb(uid):
     kb.add(types.InlineKeyboardButton("📥 تحميل جميع الملفات", callback_data="pro_download_all"))
     kb.add(types.InlineKeyboardButton("🔍 فحص تلقائي", callback_data="pro_auto_fix"))
     kb.add(types.InlineKeyboardButton("▶️ تشغيل تجريبي", callback_data="pro_test_run"))
-
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="nav_main"))
     return kb
 
@@ -598,18 +633,14 @@ def back_kb(data="nav_main"):
     kb.add(types.InlineKeyboardButton("🔙 رجوع", callback_data=data))
     return kb
 
-
 @bot.message_handler(commands=['myid'])
 def myid_cmd(msg):
-    """أمر لعرض معرف المستخدم (للمالك فقط)"""
     uid = msg.from_user.id
     bot.reply_to(msg, f"🧑‍💻 معرفك هو: <code>{uid}</code>", parse_mode="HTML")
     if uid == ADMIN_ID:
         bot.send_message(msg.chat.id, f"✅ هذا هو نفس المعرف المسجل في الكود (ADMIN_ID = {ADMIN_ID}).")
     else:
         bot.send_message(msg.chat.id, f"⚠️ هذا المعرف ({uid}) يختلف عن ADMIN_ID المسجل في الكود ({ADMIN_ID}).")
-
-# ================== بداية معالجات البوت ==================
 
 @bot.message_handler(commands=['start'])
 def start_cmd(msg):
@@ -625,7 +656,6 @@ def start_cmd(msg):
         users = read_json(USERS_DB)
         clear_cancel(uid)
         if str(uid) not in users:
-
             if len(msg.text.split()) > 1:
                 ref = msg.text.split()[1]
                 if ref.isdigit() and int(ref) != uid:
@@ -666,7 +696,7 @@ def start_cmd(msg):
         vip = is_user_pro(uid)
         
         welcome_text = (
-            f"✨ <b>مرحباً بك {escape(msg.from_user.first_name)}</b> ✨\n\n"
+            f"✨ <b>مرحباً بك {escape(msg.from_user.first_name or '')}</b> ✨\n\n"
             f"🔹 <b>رتبتك:</b> {'VIP 👑' if vip else 'مجاني 🆓'}\n"
             f"🔹 <b>نقاطك:</b> <code>{u.get('points', 0)}</code>\n"
             f"🔹 <b>عضو منذ:</b> {u.get('join_date', 'اليوم')}\n\n"
@@ -688,7 +718,6 @@ def sub_msg(chat_id):
     kb.add(types.InlineKeyboardButton("✅ تحقق", callback_data="check_sub"))
     text = "🔔 <b>اشتراك إجباري</b>\n\nيجب الاشتراك في القنوات التالية:"
     send_msg(chat_id, deco("🔔 اشتراك مطلوب", text), kb)
-
 
 @bot.callback_query_handler(func=lambda call: True)
 def callback(call):
@@ -1146,7 +1175,6 @@ def callback(call):
             bot.answer_callback_query(call.id, "✅ تم إيقاف جميع البوتات")
             admin_panel(call)
         elif data == "toggle_auto":
-
             if not is_admin(uid):
                 logger.warning(f"محاولة تغيير الموافقة التلقائية من مستخدم غير مخوّل: {uid}")
                 bot.answer_callback_query(
@@ -1196,8 +1224,6 @@ def callback(call):
                 bot.answer_callback_query(call.id, "❌ لا ملفات للتحميل!", show_alert=True)
     except Exception as e:
         logger.error(f"Callback error: {e}")
-
-
 def auto_fix_step(msg, prompt_id):
     uid = msg.from_user.id
     if is_cancelled(uid):
@@ -1210,6 +1236,12 @@ def auto_fix_step(msg, prompt_id):
     try:
         finfo = bot.get_file(msg.document.file_id)
         file_content = bot.download_file(finfo.file_path).decode('utf-8')
+        
+        is_safe, reason = scan_code_security(file_content)
+        if not is_safe:
+            ban_user(uid, f"محاولة رفع ملف خبيث في الفحص التلقائي ({reason})")
+            return
+
         fixed_content = auto_fix_errors(file_content)
         fixed_name = f"fixed_{msg.document.file_name}"
         temp_path = os.path.join(BASE_DIR, fixed_name)
@@ -1228,13 +1260,26 @@ def upload_step(msg, h_type, prompt_id):
         return
     del_msg(msg.chat.id, prompt_id, msg.message_id)
     if not msg.document or not msg.document.file_name.endswith('.py'):
-        send_msg(msg.chat.id, deco("❌ خطأ", "يجب ملف .py"), back_kb("nav_upload"))
+        send_msg(msg.chat.id, deco("❌ خطأ", "يجب رفع ملف بصيغة .py فقط!"), back_kb("nav_upload"))
         return
     files = read_json(FILES_DB)
     user_files = [f for f in files.values() if f.get('user_id') == uid and f.get('status') == 'active']
     if len(user_files) >= MAX_FILES_PER_USER:
         send_msg(msg.chat.id, deco("❌ خطأ", f"وصلت للحد الأقصى ({MAX_FILES_PER_USER}) ملفات!"), back_kb("nav_upload"))
         return
+
+    try:
+        finfo = bot.get_file(msg.document.file_id)
+        file_content = bot.download_file(finfo.file_path).decode('utf-8')
+    except Exception as e:
+        send_msg(msg.chat.id, deco("❌ خطأ", "فشل قراءة الملف المرفوع!"), back_kb("nav_upload"))
+        return
+
+    is_safe, reason = scan_code_security(file_content)
+    if not is_safe:
+        ban_user(uid, f"رفع ملف خبيث حُظر تلقائياً ({reason})")
+        return
+
     if h_type == "free":
         users = read_json(USERS_DB)
         pts = users.get(str(uid), {}).get('points', 0)
@@ -1244,11 +1289,11 @@ def upload_step(msg, h_type, prompt_id):
             reply_markup=cancel_kb()
         )
         save_message(msg.chat.id, m.message_id)
-        bot.register_next_step_handler(m, hours_step, msg.document, m.message_id)
+        bot.register_next_step_handler(m, hours_step, msg.document, file_content, m.message_id)
     else:
-        complete_upload(msg.document, uid, h_type, 0)
+        complete_upload(msg.document, file_content, uid, h_type, 0)
 
-def hours_step(msg, doc, prompt_id):
+def hours_step(msg, doc, file_content, prompt_id):
     uid = msg.from_user.id
     if is_cancelled(uid):
         clear_cancel(uid)
@@ -1266,12 +1311,10 @@ def hours_step(msg, doc, prompt_id):
     if hours > pts:
         send_msg(msg.chat.id, deco("❌ نقاط غير كافية", f"تحتاج: {hours}\nلديك: {pts}"), back_kb("nav_wallet"))
         return
-    complete_upload(doc, uid, "free", hours)
+    complete_upload(doc, file_content, uid, "free", hours)
 
-def complete_upload(doc, user_id, h_type, hours):
+def complete_upload(doc, file_content, user_id, h_type, hours):
     fid = gen_id()
-    finfo = bot.get_file(doc.file_id)
-    file_content = bot.download_file(finfo.file_path).decode('utf-8')
     
     if not save_encrypted_file(fid, file_content, user_id):
         send_msg(user_id, deco("❌ خطأ", "فشل في حفظ الملف!"), back_kb())
@@ -1307,7 +1350,7 @@ def complete_upload(doc, user_id, h_type, hours):
     
     try:
         user = bot.get_chat(user_id)
-        admin_text = f"⚠️ <b>طلب رفع</b>\n\n👤 {escape(user.first_name)}\n🆔 <code>{user_id}</code>\n📄 {escape(doc.file_name)}\n💎 {'VIP' if h_type == 'pro' else 'مجاني'}\n{'⏰ ' + str(hours) + ' ساعة' if h_type == 'free' else ''}"
+        admin_text = f"⚠️ <b>طلب رفع</b>\n\n👤 {escape(user.first_name or '')}\n🆔 <code>{user_id}</code>\n📄 {escape(doc.file_name)}\n💎 {'VIP' if h_type == 'pro' else 'مجاني'}\n{'⏰ ' + str(hours) + ' ساعة' if h_type == 'free' else ''}"
         for adm in get_admins():
             try:
                 bot.send_message(adm, admin_text, parse_mode="HTML")
@@ -1344,7 +1387,7 @@ def pending_view(call, fid):
         preview = f"<pre><code class='language-python'>{safe}</code></pre>"
     try:
         uinfo = bot.get_chat(f['user_id'])
-        utext = f"{escape(uinfo.first_name)} (@{uinfo.username if uinfo.username else 'لا يوجد'})"
+        utext = f"{escape(uinfo.first_name or '')} (@{uinfo.username if uinfo.username else 'لا يوجد'})"
     except:
         utext = f"ID: {f['user_id']}"
     text = f"📦 الملف: {f.get('file_name')}\n👤 المالك: {utext}\n🆔 <code>{f.get('user_id')}</code>\n💎 النوع: {'VIP 👑' if f.get('type') == 'pro' else 'مجاني 🆓'}\n{'⏰ المدة: ' + str(f.get('hours', 0)) + ' ساعة' if f.get('type') == 'free' else ''}\n📅 {f.get('created_at')}\n\n🔍 الكود (أول 1000 حرف):\n{preview}"
@@ -1466,7 +1509,7 @@ def toggle_file(call, fid):
         if start_script(fid):
             bot.answer_callback_query(call.id, "🚀 تم التشغيل")
         else:
-            bot.answer_callback_query(call.id, "❌ فشل!")
+            bot.answer_callback_query(call.id, "❌ فشل التشغيل!")
     file_panel(call, fid)
 
 def delete_file(call, fid):
@@ -1597,6 +1640,11 @@ def token_step(msg, fid, prompt_id):
         return
     updated_content = update_token_in_memory(content, token)
     if updated_content:
+        is_safe, reason = scan_code_security(updated_content)
+        if not is_safe:
+            ban_user(uid, f"تعديل الكود بإدخال رموز خبيثة ({reason})")
+            return
+
         files = read_json(FILES_DB)
         if fid in files:
             user_id = files[fid].get('user_id')
@@ -1638,7 +1686,7 @@ def token_info(call, fid):
         token = tokens[0]
         valid, info = check_token(token)
         if valid:
-            text = f"✅ التوكن صالح\n\n🤖 الاسم: {escape(info.get('first_name'))}\n👤 المعرف: @{info.get('username')}\n🆔 <code>{info.get('id')}</code>"
+            text = f"✅ التوكن صالح\n\n🤖 الاسم: {escape(info.get('first_name') or '')}\n👤 المعرف: @{info.get('username')}\n🆔 <code>{info.get('id')}</code>"
         else:
             text = f"❌ التوكن غير صالح\n\n{escape(str(info))}"
         kb = types.InlineKeyboardMarkup()
@@ -1661,6 +1709,11 @@ def lib_step(msg, prompt_id):
     if not msg.text:
         return
     lib = msg.text.strip()
+    
+    if any(black in lib.lower() for black in ['os', 'sys', 'subprocess', 'shutil', 'telebot', 'requests', 'pytelegrambotapi']):
+        send_msg(msg.chat.id, deco("❌ غير مسموح", "هذه المكتبة محظورة أو مثبتة مسبقاً!"), back_kb())
+        return
+
     m = bot.send_message(msg.chat.id, deco("⏳ جاري التثبيت", f"المكتبة: <b>{escape(lib)}</b>"))
     save_message(msg.chat.id, m.message_id)
     try:
@@ -1698,7 +1751,6 @@ def broadcast_step(msg, prompt_id):
     text = f"✅ اكتملت الإذاعة\n\n📫 نجح: {success}\n❌ فشل: {failed}\n📊 الإجمالي: {len(uids)}"
     bot.edit_message_text(deco("📢 إذاعة", text), msg.chat.id, wait.message_id, parse_mode="HTML", reply_markup=back_kb("nav_admin"))
 
-
 def admin_panel(call):
     users = read_json(USERS_DB)
     files = read_json(FILES_DB)
@@ -1734,14 +1786,14 @@ def users_panel(call, page=0):
     users = read_json(USERS_DB)
     user_ids = list(users.keys())
     items_per_page = 10
-    total_pages = (len(user_ids) + items_per_page - 1) // items_per_page
+    total_pages = max(1, (len(user_ids) + items_per_page - 1) // items_per_page)
     start_idx = page * items_per_page
     end_idx = start_idx + items_per_page
     page_users = user_ids[start_idx:end_idx]
     kb = types.InlineKeyboardMarkup(row_width=2)
     for uid in page_users:
         u = users[uid]
-        name = u.get('first_name', 'غير معروف')
+        name = u.get('first_name', 'غير معروف') or 'غير معروف'
         kb.add(types.InlineKeyboardButton(f"👤 {name[:10]}", callback_data=f"uctrl_{uid}"))
     nav_buttons = []
     if page > 0:
@@ -1758,7 +1810,7 @@ def all_files_panel(call, page=0):
     files = read_json(FILES_DB)
     file_ids = list(files.keys())
     items_per_page = 10
-    total_pages = (len(file_ids) + items_per_page - 1) // items_per_page
+    total_pages = max(1, (len(file_ids) + items_per_page - 1) // items_per_page)
     start_idx = page * items_per_page
     end_idx = start_idx + items_per_page
     page_files = file_ids[start_idx:end_idx]
@@ -1806,7 +1858,7 @@ def admins_panel(call):
     for aid in admins:
         try:
             user = bot.get_chat(aid)
-            name = user.first_name
+            name = user.first_name or 'أدمن'
             owner = "👑" if aid == ADMIN_ID else "👮"
             text += f"{owner} {escape(name)} - <code>{aid}</code>\n"
             if aid != ADMIN_ID and is_main_admin(uid):
@@ -2013,7 +2065,7 @@ def settings_panel(call):
     has_img = "✅" if settings.get('bot_image') else "❌"
     has_thumb = "✅" if settings.get('file_thumb') and os.path.exists(settings.get('file_thumb', '')) else "❌"
     auto_approve = "✅" if settings.get('auto_approve', True) else "❌"
-    text = f"✏️ اسم البوت: {settings.get('bot_name', 'Div: @telnet_api')}\n🖼 صورة البوت: {has_img}\n🎨 أيقونة الملفات: {has_thumb}\n✅ موافقة تلقائية: {auto_approve}"
+    text = f"✏️ اسم البوت: {settings.get('bot_name', 'Dev: @scofr')}\n🖼 صورة البوت: {has_img}\n🎨 أيقونة الملفات: {has_thumb}\n✅ موافقة تلقائية: {auto_approve}"
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton("✏️ تغيير الاسم", callback_data="set_name"))
     if settings.get('bot_image'):
@@ -2121,11 +2173,10 @@ def monitor():
             logger.error(f"Monitor error: {e}")
         time.sleep(60)
 
-# ================== التهيئة والتشغيل ==================
 def init_db():
     default_settings = {
         "channels": [],
-        "bot_name": "Div: @telnet_api",
+        "bot_name": "Dev🎩: @scofr",
         "bot_image": None,
         "file_thumb": None,
         "bot_locked": False,
@@ -2165,7 +2216,7 @@ if __name__ == "__main__":
     init_security()
     threading.Thread(target=monitor, daemon=True).start()
     logger.info("=" * 30)
-    logger.info("Div: @telnet_api - البوت يعمل")
+    logger.info("Dev: @scofr - البوت يعمل مع حماية متكاملة")
     logger.info("=" * 30)
     while True:
         try:
@@ -2173,4 +2224,3 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"Polling error: {e}")
             time.sleep(5)
-
