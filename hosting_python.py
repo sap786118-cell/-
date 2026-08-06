@@ -129,7 +129,7 @@ def write_json(path, data):
 def deco(title, content):
     settings = read_json(SETTINGS_DB)
     name = settings.get('bot_name', 'Dev🎩: @scofr')
-    return f"<b>{title}</b>\n\n{content}\n\n<b>Div: @telnet_api</b>"
+    return f"<b>{title}</b>\n\n{content}\n\n<b>Dev👑: @scofr</b>"
 
 def get_master_key():
     security = read_json(SECURITY_DB)
