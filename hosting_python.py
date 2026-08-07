@@ -210,47 +210,17 @@ def load_encrypted_file(fid):
         return decrypt_file_content(encrypted_content, fid)
     return None
 
-def ban_user(user_id, reason="رفع ملفات خبيثة"):
-    users = read_json(USERS_DB)
-    if str(user_id) in users:
-        users[str(user_id)]['is_banned'] = 1
-        users[str(user_id)]['ban_reason'] = reason
-        write_json(USERS_DB, users)
-    
-    files = read_json(FILES_DB)
-    for fid, f in list(files.items()):
-        if f.get('user_id') == user_id:
-            stop_script(fid)
-            f['status'] = 'banned'
-    write_json(FILES_DB, files)
-    
-    logger.warning(f"🚨 تم حظر المستخدم {user_id} تلقائياً للسبب: {reason}")
-    try:
-        bot.send_message(user_id, deco("🚫 تم حظرك تلقائياً", f"تم حظرك وحظر ملفاتك للسبب التالي:\n<b>{reason}</b>"))
-    except:
-        pass
-    for adm in get_admins():
-        try:
-            bot.send_message(adm, f"🚨 <b>تنبيه أمني!</b>\nتم حظر المستخدم <code>{user_id}</code> تلقائياً.\nالسبب: {reason}")
-        except:
-            pass
-
 def scan_code_security(code_str):
     if TOKEN in code_str:
         return False, "محاولة استخدام توكن البوت الرئيسي للتحكم بالبوت!"
     
     dangerous_patterns = [
-        (r'import\s+sys|from\s+sys', "محاولة الوصول لمكتبة sys"),
-        (r'import\s+subprocess|from\s+subprocess', "محاولة تنفيذ أوامر النظام (subprocess)"),
-        (r'import\s+os|from\s+os', "محاولة التعامل مع نظام الملفات (os)"),
-        (r'import\s+shutil|from\s+shutil', "محاولة التعامل مع الملفات المتقدمة (shutil)"),
+        (r'open\s*\(\s*[\'"].*?\.(json|log|db|key|enc)[\'"]', "محاولة الوصول لقواعد بيانات أو ملفات البوت المغلقة"),
+        (r'USERS_DB|FILES_DB|SETTINGS_DB|ADMINS_DB|SECURITY_DB', "محاولة الوصول لمتغيرات النظام الحساسة"),
         (r'eval\s*\(', "استخدام دالة eval الخطيرة"),
         (r'exec\s*\(', "استخدام دالة exec الخطيرة"),
-        (r'__import__\s*\(', "استخدام __import__ لاستدعاء مكتبات مخفية"),
-        (r'open\s*\(\s*[\'"].*?\.(json|log|db|key|enc)[\'"]', "محاولة الوصول لقواعد بيانات أو ملفات البوت"),
         (r'ban_chat_member|kick_chat_member', "محاولة حظر المستخدمين القسرية"),
-        (r'get_updates|delete_webhook', "محاولة التجسس أو تعطيل استقبال الرسائل"),
-        (r'USERS_DB|FILES_DB|SETTINGS_DB|ADMINS_DB|SECURITY_DB', "محاولة الوصول لمتغيرات قواعد البيانات")
+        (r'get_updates|delete_webhook', "محاولة التجسس أو تعطيل استقبال الرسائل")
     ]
     
     for pattern, reason in dangerous_patterns:
@@ -265,16 +235,9 @@ def scan_code_security(code_str):
                 self.reason = ""
                 
             def visit_Attribute(self, node):
-                if node.attr in ['__subclasses__', '__bases__', '__mro__', '__globals__', '__code__']:
+                if node.attr in ['__subclasses__', '__bases__', '__mro__', '__globals__']:
                     self.violates = True
                     self.reason = f"محاولة التسلل البرمجي عبر الخصائص المخفية: {node.attr}"
-                self.generic_visit(node)
-                
-            def visit_Call(self, node):
-                if isinstance(node.func, ast.Name):
-                    if node.func.id in ['compile', 'globals', 'locals']:
-                        self.violates = True
-                        self.reason = f"استخدام دالة نظام غير آمنة: {node.func.id}"
                 self.generic_visit(node)
 
         visitor = SecurityVisitor()
@@ -452,7 +415,6 @@ def start_script(fid):
 
     is_safe, reason = scan_code_security(encrypted_content)
     if not is_safe:
-        ban_user(user_id, f"محاولة تشغيل ملف خبيث ({reason})")
         return False
 
     env_dir = os.path.join(ENV_DIR, fid)
@@ -596,7 +558,6 @@ def del_msg(chat_id, *msg_ids):
 
 def main_kb(uid):
     kb = types.InlineKeyboardMarkup(row_width=2)
-    # 🟢 أزرار ملونة أخضر للرفع والتصفح
     kb.add(types.InlineKeyboardButton("📤 رفع ملف جديد", callback_data="nav_upload", style="success"))
     kb.row(
         types.InlineKeyboardButton("📁 ملفاتي", callback_data="nav_files", style="primary"),
@@ -1241,7 +1202,7 @@ def auto_fix_step(msg, prompt_id):
         
         is_safe, reason = scan_code_security(file_content)
         if not is_safe:
-            ban_user(uid, f"محاولة رفع ملف خبيث في الفحص التلقائي ({reason})")
+            send_msg(msg.chat.id, deco("❌ تم رفض الملف", f"الملف يحتوي على تعليمات غير مسموحة:\n<b>{reason}</b>"), back_kb("nav_pro"))
             return
 
         fixed_content = auto_fix_errors(file_content)
@@ -1279,7 +1240,7 @@ def upload_step(msg, h_type, prompt_id):
 
     is_safe, reason = scan_code_security(file_content)
     if not is_safe:
-        ban_user(uid, f"رفع ملف خبيث حُظر تلقائياً ({reason})")
+        send_msg(msg.chat.id, deco("❌ تم رفض الملف", f"تعذر قبول الملف للسبب التالي:\n<b>{reason}</b>"), back_kb("nav_upload"))
         return
 
     if h_type == "free":
@@ -1394,7 +1355,6 @@ def pending_view(call, fid):
         utext = f"ID: {f['user_id']}"
     text = f"📦 الملف: {f.get('file_name')}\n👤 المالك: {utext}\n🆔 <code>{f.get('user_id')}</code>\n💎 النوع: {'VIP 👑' if f.get('type') == 'pro' else 'مجاني 🆓'}\n{'⏰ المدة: ' + str(f.get('hours', 0)) + ' ساعة' if f.get('type') == 'free' else ''}\n📅 {f.get('created_at')}\n\n🔍 الكود (أول 1000 حرف):\n{preview}"
     kb = types.InlineKeyboardMarkup(row_width=2)
-    # 🟢 قبول بالأخضر و 🔴 رفض بالأحمر
     kb.add(
         types.InlineKeyboardButton("✅ قبول", callback_data=f"approve_{fid}", style="success"),
         types.InlineKeyboardButton("❌ رفض", callback_data=f"reject_{fid}", style="danger")
@@ -1481,7 +1441,6 @@ def file_panel(call, fid):
         hrs = f"{process_hours[fid]} ساعة"
     text = f"📄 الملف: {f.get('file_name')}\n💎 النوع: {'VIP 👑' if f.get('type') == 'pro' else 'مجاني 🆓'}\n🟢 الحالة: {'يعمل ✅' if running else 'متوقف ❌'}\n⏰ المتبقي: {hrs}\n📅 {f.get('created_at')}\n\n🔍 الكود (أول 1000 حرف):\n{preview}"
     kb = types.InlineKeyboardMarkup(row_width=2)
-    # 🔴 زر إيقاف / 🟢 زر تشغيل
     btn_toggle = types.InlineKeyboardButton("⏸ إيقاف" if running else "▶️ تشغيل", callback_data=f"toggle_{fid}", style="danger" if running else "success")
     kb.add(
         btn_toggle,
@@ -1648,7 +1607,7 @@ def token_step(msg, fid, prompt_id):
     if updated_content:
         is_safe, reason = scan_code_security(updated_content)
         if not is_safe:
-            ban_user(uid, f"تعديل الكود بإدخال رموز خبيثة ({reason})")
+            send_msg(msg.chat.id, deco("❌ تم رفض التعديل", f"الكود بعد التعديل يحتوي على تعليمات غير مسموحة:\n<b>{reason}</b>"), back_kb(f"manage_{fid}"))
             return
 
         files = read_json(FILES_DB)
@@ -1716,8 +1675,8 @@ def lib_step(msg, prompt_id):
         return
     lib = msg.text.strip()
     
-    if any(black in lib.lower() for black in ['os', 'sys', 'subprocess', 'shutil', 'telebot', 'requests', 'pytelegrambotapi']):
-        send_msg(msg.chat.id, deco("❌ غير مسموح", "هذه المكتبة محظورة أو مثبتة مسبقاً!"), back_kb())
+    if any(black in lib.lower() for black in ['telebot', 'requests', 'pytelegrambotapi']):
+        send_msg(msg.chat.id, deco("❌ غير مسموح", "هذه المكتبة مثبتة مسبقاً!"), back_kb())
         return
 
     m = bot.send_message(msg.chat.id, deco("⏳ جاري التثبيت", f"المكتبة: <b>{escape(lib)}</b>"))
